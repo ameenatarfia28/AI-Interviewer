@@ -3,6 +3,7 @@ import io
 import wave
 import struct
 import math
+import base64
 
 from google import genai
 
@@ -11,8 +12,15 @@ from google import genai
 # GEMINI CLIENT
 # =========================================================
 
+API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not API_KEY:
+    raise RuntimeError(
+        "GEMINI_API_KEY is not configured."
+    )
+
 client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
+    api_key=API_KEY
 )
 
 
@@ -20,17 +28,23 @@ client = genai.Client(
 # SILENCE DETECTION
 # =========================================================
 
-def is_silent_audio(audio_bytes, silence_threshold=500):
+def is_silent_audio(
+    audio_bytes,
+    silence_threshold=500
+):
     """
-    Checks whether the recorded WAV audio contains
-    meaningful sound.
+    Check whether a WAV recording is essentially silent.
 
     Returns:
-        True  -> Audio is silent / almost silent
-        False -> Audio contains sound
+        True  -> no meaningful audio detected
+        False -> audio/speech may be present
     """
 
+    if not audio_bytes:
+        return True
+
     try:
+
         audio_stream = io.BytesIO(audio_bytes)
 
         with wave.open(audio_stream, "rb") as wav_file:
@@ -38,20 +52,29 @@ def is_silent_audio(audio_bytes, silence_threshold=500):
             sample_width = wav_file.getsampwidth()
             frame_count = wav_file.getnframes()
 
-            raw_audio = wav_file.readframes(frame_count)
-
-        # -------------------------------------------------
-        # No audio data
-        # -------------------------------------------------
+            raw_audio = wav_file.readframes(
+                frame_count
+            )
 
         if not raw_audio:
             return True
 
         # -------------------------------------------------
+        # 8-bit PCM
+        # -------------------------------------------------
+
+        if sample_width == 1:
+
+            samples = [
+                sample - 128
+                for sample in raw_audio
+            ]
+
+        # -------------------------------------------------
         # 16-bit PCM
         # -------------------------------------------------
 
-        if sample_width == 2:
+        elif sample_width == 2:
 
             sample_count = len(raw_audio) // 2
 
@@ -59,17 +82,6 @@ def is_silent_audio(audio_bytes, silence_threshold=500):
                 f"<{sample_count}h",
                 raw_audio
             )
-
-        # -------------------------------------------------
-        # 8-bit PCM
-        # -------------------------------------------------
-
-        elif sample_width == 1:
-
-            samples = [
-                sample - 128
-                for sample in raw_audio
-            ]
 
         # -------------------------------------------------
         # 32-bit PCM
@@ -86,19 +98,15 @@ def is_silent_audio(audio_bytes, silence_threshold=500):
 
         else:
 
-            # Unknown audio format
-            # Let Gemini handle it
+            # Unknown WAV format.
+            # Let Gemini process it.
             return False
-
-        # -------------------------------------------------
-        # No samples
-        # -------------------------------------------------
 
         if not samples:
             return True
 
         # -------------------------------------------------
-        # Calculate RMS audio energy
+        # RMS energy
         # -------------------------------------------------
 
         squared_sum = sum(
@@ -110,22 +118,20 @@ def is_silent_audio(audio_bytes, silence_threshold=500):
             squared_sum / len(samples)
         )
 
-        print(f"Audio RMS: {rms}")
-
-        # -------------------------------------------------
-        # Determine silence
-        # -------------------------------------------------
+        print(
+            f"[VOICE] Audio RMS: {rms:.2f}"
+        )
 
         return rms < silence_threshold
 
     except Exception as e:
 
         print(
-            f"Silence detection error: {e}"
+            f"[VOICE] Silence detection warning: {e}"
         )
 
-        # If local audio analysis fails,
-        # don't automatically reject the recording.
+        # Don't reject valid recordings just because
+        # local silence analysis failed.
         return False
 
 
@@ -138,21 +144,15 @@ def transcribe_audio(
     mime_type="audio/wav"
 ):
     """
-    Converts the candidate's voice recording into text.
+    Convert the candidate's speech into text.
 
-    The function first checks for silence locally.
-    If speech is present, Gemini transcribes the audio.
-
-    Returns:
-        str -> transcript
-
-    Raises:
-        ValueError("NO_SPEECH_DETECTED")
-        when no meaningful speech is detected.
+    Important:
+    Gemini expects inline audio `data` as a Base64 string,
+    not raw binary bytes.
     """
 
     # =====================================================
-    # BASIC VALIDATION
+    # VALIDATE AUDIO
     # =====================================================
 
     if not audio_bytes:
@@ -172,44 +172,55 @@ def transcribe_audio(
         )
 
     # =====================================================
+    # CONVERT BINARY AUDIO -> BASE64 STRING
+    # =====================================================
+
+    audio_base64 = base64.b64encode(
+        audio_bytes
+    ).decode("utf-8")
+
+    # =====================================================
     # TRANSCRIPTION PROMPT
     # =====================================================
 
     prompt = """
-You are a strict speech-to-text system for an AI technical
+You are a strict speech-to-text system for a technical
 interview application.
 
-Your job is ONLY to transcribe what the candidate actually says.
+Your ONLY task is to transcribe the candidate's actual speech.
 
-IMPORTANT RULES:
+Rules:
 
-1. NEVER invent or hallucinate an answer.
-2. NEVER guess what the candidate intended to say.
-3. NEVER create a dummy/sample answer.
-4. NEVER answer the interview question yourself.
-5. NEVER summarize the candidate's answer.
+1. Never invent words.
+2. Never guess what the candidate intended to say.
+3. Never create a dummy answer.
+4. Never answer the interview question yourself.
+5. Never summarize the candidate's response.
 6. Do not add explanations.
-7. Preserve technical terminology exactly when possible.
+7. Preserve technical terms such as Python, Java, SQL,
+   OOP, API, database, machine learning, etc.
 8. If the candidate says nothing, return exactly:
    NO_SPEECH_DETECTED
-9. If there is only silence, return exactly:
+9. If the recording contains only silence, return exactly:
    NO_SPEECH_DETECTED
-10. If there is only background noise and no understandable speech,
-    return exactly:
+10. If there is only background noise and no understandable
+    speech, return exactly:
     NO_SPEECH_DETECTED
-11. If the candidate speaks only a few words, return only those
+11. If the candidate says only a few words, return only those
     words.
-12. Do not complete an incomplete sentence yourself.
+12. Do not complete incomplete sentences yourself.
 
-Return ONLY one of these:
+Return ONLY:
 
-- The exact transcript of the candidate's speech
+The actual transcript
+
 OR
-- NO_SPEECH_DETECTED
+
+NO_SPEECH_DETECTED
 """
 
     # =====================================================
-    # SEND AUDIO TO GEMINI
+    # GEMINI REQUEST
     # =====================================================
 
     try:
@@ -225,7 +236,7 @@ OR
                 },
                 {
                     "type": "audio",
-                    "data": audio_bytes,
+                    "data": audio_base64,
                     "mime_type": mime_type
                 }
             ]
@@ -234,16 +245,18 @@ OR
     except Exception as e:
 
         print(
-            f"Gemini transcription error: {e}"
+            f"[VOICE] Gemini error: {e}"
         )
 
         raise e
 
     # =====================================================
-    # GET GEMINI RESPONSE
+    # GET OUTPUT
     # =====================================================
 
-    transcript = interaction.output_text.strip()
+    transcript = (
+        interaction.output_text or ""
+    ).strip()
 
     # =====================================================
     # EMPTY RESPONSE
@@ -256,54 +269,46 @@ OR
         )
 
     # =====================================================
-    # GEMINI DETECTED NO SPEECH
+    # EXPLICIT NO-SPEECH RESPONSE
     # =====================================================
 
-    if transcript.upper().strip() == "NO_SPEECH_DETECTED":
+    if transcript.upper() == "NO_SPEECH_DETECTED":
 
         raise ValueError(
             "NO_SPEECH_DETECTED"
         )
 
     # =====================================================
-    # EXTRA PROTECTION AGAINST GENERATED RESPONSES
+    # PROTECT AGAINST NON-TRANSCRIPT RESPONSES
     # =====================================================
 
-    fake_responses = [
+    invalid_responses = {
 
         "there is no speech",
-
         "no speech detected",
-
-        "the speaker did not say anything",
-
-        "the audio is silent",
-
-        "the audio contains silence",
-
         "no audible speech",
-
+        "the audio is silent",
+        "the audio contains silence",
+        "the speaker did not say anything",
         "the candidate did not speak",
-
         "the candidate has not spoken",
-
-        "there is no audible speech",
-
         "no understandable speech"
-    ]
+    }
 
-    transcript_lower = transcript.lower().strip()
+    normalized = transcript.lower().strip()
 
-    for phrase in fake_responses:
+    if normalized in invalid_responses:
 
-        if transcript_lower == phrase:
-
-            raise ValueError(
-                "NO_SPEECH_DETECTED"
-            )
+        raise ValueError(
+            "NO_SPEECH_DETECTED"
+        )
 
     # =====================================================
     # RETURN REAL TRANSCRIPT
     # =====================================================
+
+    print(
+        f"[VOICE] Transcript: {transcript}"
+    )
 
     return transcript
