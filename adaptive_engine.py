@@ -1,65 +1,102 @@
+from collections import defaultdict
+
+
+DIFFICULTY_ORDER = ["Easy", "Medium", "Hard"]
+
+
+
 def determine_next_difficulty(score, current_difficulty):
-    """
-    Determine the difficulty of the next question
-    based on the candidate's previous score.
-    """
-
-    difficulties = ["Easy", "Medium", "Hard"]
-
-    current_index = difficulties.index(current_difficulty)
-
-    # Excellent answer
-    if score >= 8:
-
-        if current_index < len(difficulties) - 1:
-            return difficulties[current_index + 1]
-
-        return "Hard"
-
-    # Average answer
-    elif score >= 5:
-
+    """Adapt difficulty using the previous answer score."""
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
         return current_difficulty
 
-    # Weak answer
-    else:
+    current = str(current_difficulty).title()
 
-        if current_index > 0:
-            return difficulties[current_index - 1]
+    if current not in DIFFICULTY_ORDER:
+        current = "Medium"
 
-        return "Easy"
-def select_next_topic(
-    selected_topics,
-    topic_scores
-):
+    index = DIFFICULTY_ORDER.index(current)
+
+    if score >= 8:
+        index = min(index + 1, len(DIFFICULTY_ORDER) - 1)
+    elif score <= 4:
+        index = max(index - 1, 0)
+
+    return DIFFICULTY_ORDER[index]
+
+
+
+def select_next_topic(selected_topics, topic_scores):
     """
-    Select the next topic based on performance.
+    Choose a topic using topic-level performance.
+
+    topic_scores format:
+        {
+            "OOP": [8, 7],
+            "Inheritance": [5]
+        }
     """
+    if not selected_topics:
+        raise ValueError("No interview topics were selected.")
 
-    # Topics that have not been asked yet
-    for topic in selected_topics:
+    scores = topic_scores or {}
 
-        if topic not in topic_scores:
-            return topic
+    # Prefer topics that have not been answered yet.
+    unused = [topic for topic in selected_topics if topic not in scores]
+    if unused:
+        return unused[0]
 
-    # Find topic with lowest average score
-    weakest_topic = None
-    weakest_average = 11
+    # Otherwise choose the weakest average topic.
+    def average(topic):
+        values = scores.get(topic, [])
+        if not values:
+            return 0.0
+        numeric = []
+        for value in values:
+            try:
+                numeric.append(float(value))
+            except (TypeError, ValueError):
+                pass
+        return sum(numeric) / len(numeric) if numeric else 0.0
 
-    for topic in selected_topics:
+    return min(selected_topics, key=average)
 
-        scores = topic_scores.get(topic, [])
 
-        if scores:
 
-            average = sum(scores) / len(scores)
+def select_next_question(question_pool, target_difficulty, used_questions):
+    """Pick an unused question close to the adaptive difficulty."""
+    used_questions = set(used_questions or [])
 
-            if average < weakest_average:
+    available = [
+        item for item in question_pool
+        if item.get("question") not in used_questions
+    ]
 
-                weakest_average = average
-                weakest_topic = topic
+    if not available:
+        return None
 
-    if weakest_topic:
-        return weakest_topic
+    target = str(target_difficulty).title()
 
-    return selected_topics[0]
+    # Exact difficulty first.
+    for item in available:
+        if str(item.get("difficulty", "Medium")).title() == target:
+            return item
+
+    # Fall back to nearest difficulty.
+    try:
+        target_idx = DIFFICULTY_ORDER.index(target)
+    except ValueError:
+        target_idx = 1
+
+    return min(
+        available,
+        key=lambda item: abs(
+            DIFFICULTY_ORDER.index(
+                str(item.get("difficulty", "Medium")).title()
+                if str(item.get("difficulty", "Medium")).title() in DIFFICULTY_ORDER
+                else "Medium"
+            ) - target_idx
+        )
+    )
